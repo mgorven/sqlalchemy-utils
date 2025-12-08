@@ -18,9 +18,10 @@ class CreateView(DDLElement):
 
 @compiler.compiles(CreateView)
 def compile_create_materialized_view(element, compiler, **kw):
-    return 'CREATE {}{}VIEW {} AS {}'.format(
-        'OR REPLACE ' if element.replace else '',
+    return 'CREATE {}{}VIEW {}{} AS {}'.format(
+        'OR REPLACE ' if element.replace and compiler.dialect.name != "sqlite" else '',
         'MATERIALIZED ' if element.materialized else '',
+        'IF NOT EXISTS ' if element.replace and compiler.dialect.name == "sqlite" else '',
         compiler.dialect.identifier_preparer.quote(element.name),
         compiler.sql_compiler.process(element.selectable, literal_binds=True),
     )
