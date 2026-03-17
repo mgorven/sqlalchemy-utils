@@ -6,11 +6,21 @@ from sqlalchemy.sql.expression import ClauseElement, Executable
 from sqlalchemy_utils.functions import get_columns
 
 
+def quote_identifier(dialect, name, schema=None):
+    quoted = dialect.identifier_preparer.quote(name)
+    if schema:
+        return f'{dialect.identifier_preparer.quote(schema)}.{quoted}'
+    return quoted
+
+
 class CreateView(DDLElement):
-    def __init__(self, name, selectable, materialized=False, replace=False):
+    def __init__(
+        self, name, selectable, materialized=False, replace=False, schema=None
+    ):
         if materialized and replace:
             raise ValueError('Cannot use CREATE OR REPLACE with materialized views')
         self.name = name
+        self.schema = schema
         self.selectable = selectable
         self.materialized = materialized
         self.replace = replace
@@ -19,17 +29,20 @@ class CreateView(DDLElement):
 @compiler.compiles(CreateView)
 def compile_create_materialized_view(element, compiler, **kw):
     return 'CREATE {}{}VIEW {}{} AS {}'.format(
-        'OR REPLACE ' if element.replace and compiler.dialect.name != "sqlite" else '',
+        'OR REPLACE ' if element.replace and compiler.dialect.name != 'sqlite' else '',
         'MATERIALIZED ' if element.materialized else '',
-        'IF NOT EXISTS ' if element.replace and compiler.dialect.name == "sqlite" else '',
-        compiler.dialect.identifier_preparer.quote(element.name),
+        'IF NOT EXISTS '
+        if element.replace and compiler.dialect.name == 'sqlite'
+        else '',
+        quote_identifier(compiler.dialect, element.name, element.schema),
         compiler.sql_compiler.process(element.selectable, literal_binds=True),
     )
 
 
 class DropView(DDLElement):
-    def __init__(self, name, materialized=False, cascade=True):
+    def __init__(self, name, materialized=False, cascade=True, schema=None):
         self.name = name
+        self.schema = schema
         self.materialized = materialized
         self.cascade = cascade
 
@@ -38,7 +51,7 @@ class DropView(DDLElement):
 def compile_drop_materialized_view(element, compiler, **kw):
     return 'DROP {}VIEW IF EXISTS {} {}'.format(
         'MATERIALIZED ' if element.materialized else '',
-        compiler.dialect.identifier_preparer.quote(element.name),
+        quote_identifier(compiler.dialect, element.name, element.schema),
         'CASCADE' if element.cascade else '',
     )
 
@@ -67,7 +80,9 @@ def create_table_from_selectable(
     return table
 
 
-def create_materialized_view(name, selectable, metadata, indexes=None, aliases=None):
+def create_materialized_view(
+    name, selectable, metadata, indexes=None, aliases=None, schema=None
+):
     """Create a view on a given metadata
 
     :param name: The name of the view to create.
@@ -90,10 +105,13 @@ def create_materialized_view(name, selectable, metadata, indexes=None, aliases=N
         indexes=indexes,
         metadata=None,
         aliases=aliases,
+        schema=schema,
     )
 
     sa.event.listen(
-        metadata, 'after_create', CreateView(name, selectable, materialized=True)
+        metadata,
+        'after_create',
+        CreateView(name, selectable, materialized=True, schema=schema),
     )
 
     @sa.event.listens_for(metadata, 'after_create')
@@ -101,7 +119,9 @@ def create_materialized_view(name, selectable, metadata, indexes=None, aliases=N
         for idx in table.indexes:
             idx.create(connection)
 
-    sa.event.listen(metadata, 'before_drop', DropView(name, materialized=True))
+    sa.event.listen(
+        metadata, 'before_drop', DropView(name, materialized=True, schema=schema)
+    )
     return table
 
 
@@ -111,6 +131,7 @@ def create_view(
     metadata,
     cascade_on_drop=True,
     replace=False,
+    schema=None,
 ):
     """Create a view on a given metadata
 
@@ -147,13 +168,13 @@ def create_view(
 
     """
     table = create_table_from_selectable(
-        name=name, selectable=selectable, metadata=None
+        name=name, selectable=selectable, metadata=None, schema=schema
     )
 
     sa.event.listen(
         metadata,
         'after_create',
-        CreateView(name, selectable, replace=replace),
+        CreateView(name, selectable, replace=replace, schema=schema),
     )
 
     @sa.event.listens_for(metadata, 'after_create')
@@ -161,27 +182,30 @@ def create_view(
         for idx in table.indexes:
             idx.create(connection)
 
-    sa.event.listen(metadata, 'before_drop', DropView(name, cascade=cascade_on_drop))
+    sa.event.listen(
+        metadata, 'before_drop', DropView(name, cascade=cascade_on_drop, schema=schema)
+    )
     return table
 
 
 class RefreshMaterializedView(Executable, ClauseElement):
     inherit_cache = True
 
-    def __init__(self, name, concurrently):
+    def __init__(self, name, concurrently, schema=None):
         self.name = name
         self.concurrently = concurrently
+        self.schema = schema
 
 
 @compiler.compiles(RefreshMaterializedView)
 def compile_refresh_materialized_view(element, compiler):
     return 'REFRESH MATERIALIZED VIEW {concurrently}{name}'.format(
         concurrently='CONCURRENTLY ' if element.concurrently else '',
-        name=compiler.dialect.identifier_preparer.quote(element.name),
+        name=quote_identifier(compiler.dialect, element.name, element.schema),
     )
 
 
-def refresh_materialized_view(session, name, concurrently=False):
+def refresh_materialized_view(session, name, concurrently=False, schema=None):
     """Refreshes an already existing materialized view
 
     :param session: An SQLAlchemy Session instance.
@@ -193,4 +217,4 @@ def refresh_materialized_view(session, name, concurrently=False):
     # Since session.execute() bypasses autoflush, we must manually flush in
     # order to include newly-created/modified objects in the refresh.
     session.flush()
-    session.execute(RefreshMaterializedView(name, concurrently))
+    session.execute(RefreshMaterializedView(name, concurrently, schema=schema))
